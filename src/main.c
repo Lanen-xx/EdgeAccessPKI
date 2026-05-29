@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define APP_VERSION "1.1.0"
 #define APP_OK(label) printf("[OK] %s\n", label)
 #define APP_CHECK(cond, label)                                                \
     do                                                                         \
@@ -24,6 +25,142 @@ typedef struct
     sm2_ec_point_t public_key;
     sm2_pki_transparency_witness_t meta;
 } witness_slot_t;
+
+typedef struct
+{
+    char site_id[64];
+    char line_id[64];
+    char terminal_id[64];
+    char controller_id[64];
+    char command[128];
+    uint64_t maintenance_window_s;
+    unsigned required_witnesses;
+    int fail_closed;
+    int json_output;
+} app_config_t;
+
+static void copy_field(char *dst, size_t dst_len, const char *src)
+{
+    if (!dst || dst_len == 0U)
+        return;
+    if (!src)
+        src = "";
+    snprintf(dst, dst_len, "%s", src);
+}
+
+static void app_config_default(app_config_t *cfg)
+{
+    memset(cfg, 0, sizeof(*cfg));
+    copy_field(cfg->site_id, sizeof(cfg->site_id), "plant-east");
+    copy_field(cfg->line_id, sizeof(cfg->line_id), "line-ctrl-07");
+    copy_field(cfg->terminal_id, sizeof(cfg->terminal_id), "MAINT-TERMINAL-17");
+    copy_field(cfg->controller_id, sizeof(cfg->controller_id), "LINE-CTRL-07");
+    copy_field(cfg->command, sizeof(cfg->command),
+        "maintenance:open-panel:line-ctrl-07");
+    cfg->maintenance_window_s = 900U;
+    cfg->required_witnesses = 2U;
+    cfg->fail_closed = 1;
+}
+
+static char *trim(char *s)
+{
+    char *end = NULL;
+    while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n')
+        s++;
+    if (*s == '\0')
+        return s;
+    end = s + strlen(s) - 1U;
+    while (end > s
+        && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n'))
+    {
+        *end = '\0';
+        end--;
+    }
+    return s;
+}
+
+static int parse_bool(const char *value, int *out)
+{
+    if (strcmp(value, "true") == 0 || strcmp(value, "1") == 0
+        || strcmp(value, "yes") == 0)
+    {
+        *out = 1;
+        return 1;
+    }
+    if (strcmp(value, "false") == 0 || strcmp(value, "0") == 0
+        || strcmp(value, "no") == 0)
+    {
+        *out = 0;
+        return 1;
+    }
+    return 0;
+}
+
+static int load_config(const char *path, app_config_t *cfg)
+{
+    FILE *fp = fopen(path, "r");
+    char line[256];
+    if (!fp)
+    {
+        fprintf(stderr,
+            "[WARN] config file '%s' not found; using built-in safe defaults\n",
+            path);
+        return 1;
+    }
+    while (fgets(line, sizeof(line), fp))
+    {
+        char *key = trim(line);
+        char *eq = NULL;
+        char *value = NULL;
+        if (*key == '\0' || *key == '#')
+            continue;
+        eq = strchr(key, '=');
+        if (!eq)
+        {
+            fclose(fp);
+            fprintf(stderr, "[FAIL] invalid config line: %s\n", key);
+            return 0;
+        }
+        *eq = '\0';
+        key = trim(key);
+        value = trim(eq + 1);
+        if (strcmp(key, "site_id") == 0)
+            copy_field(cfg->site_id, sizeof(cfg->site_id), value);
+        else if (strcmp(key, "line_id") == 0)
+            copy_field(cfg->line_id, sizeof(cfg->line_id), value);
+        else if (strcmp(key, "terminal_id") == 0)
+            copy_field(cfg->terminal_id, sizeof(cfg->terminal_id), value);
+        else if (strcmp(key, "controller_id") == 0)
+            copy_field(cfg->controller_id, sizeof(cfg->controller_id), value);
+        else if (strcmp(key, "command") == 0)
+            copy_field(cfg->command, sizeof(cfg->command), value);
+        else if (strcmp(key, "maintenance_window_s") == 0)
+            cfg->maintenance_window_s = strtoull(value, NULL, 10);
+        else if (strcmp(key, "required_witnesses") == 0)
+            cfg->required_witnesses = (unsigned)strtoul(value, NULL, 10);
+        else if (strcmp(key, "fail_closed") == 0)
+        {
+            if (!parse_bool(value, &cfg->fail_closed))
+            {
+                fclose(fp);
+                fprintf(stderr, "[FAIL] invalid fail_closed value: %s\n",
+                    value);
+                return 0;
+            }
+        }
+        else
+            fprintf(stderr, "[WARN] ignored config key: %s\n", key);
+    }
+    fclose(fp);
+    return 1;
+}
+
+static void print_usage(const char *argv0)
+{
+    printf("EdgeAccessPKI %s\n", APP_VERSION);
+    printf("Usage: %s [--config PATH] [--json] [--version]\n", argv0);
+    printf("Default config: config/gateway.conf\n");
+}
 
 static int init_witness(witness_slot_t *slot, const char *id)
 {
@@ -153,11 +290,41 @@ static int build_request(sm2_pki_client_ctx_t *client, const uint8_t *message,
     return 1;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    app_config_t cfg;
+    const char *config_path = "config/gateway.conf";
     const uint64_t base_now = 1760000100ULL;
     const uint8_t issuer[] = "EdgeAccessPKI-Industrial-CA";
     const uint8_t usage = SM2_KU_DIGITAL_SIGNATURE;
+
+    app_config_default(&cfg);
+    for (int i = 1; i < argc; i++)
+    {
+        if (strcmp(argv[i], "--config") == 0 && i + 1 < argc)
+            config_path = argv[++i];
+        else if (strcmp(argv[i], "--json") == 0)
+            cfg.json_output = 1;
+        else if (strcmp(argv[i], "--version") == 0)
+        {
+            printf("%s\n", APP_VERSION);
+            return 0;
+        }
+        else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0)
+        {
+            print_usage(argv[0]);
+            return 0;
+        }
+        else
+        {
+            print_usage(argv[0]);
+            return 1;
+        }
+    }
+    APP_CHECK(load_config(config_path, &cfg), "load gateway configuration");
+    APP_CHECK(cfg.required_witnesses == 2U, "enforce 2-of-2 plant policy");
+    printf("[INFO] site=%s line=%s terminal=%s controller=%s\n", cfg.site_id,
+        cfg.line_id, cfg.terminal_id, cfg.controller_id);
 
     sm2_pki_service_ctx_t *service = NULL;
     APP_CHECK(sm2_pki_service_create(&service, issuer, sizeof(issuer) - 1, 64,
@@ -173,10 +340,10 @@ int main(void)
     memset(&controller_cert, 0, sizeof(controller_cert));
     memset(&maint_temp, 0, sizeof(maint_temp));
     memset(&controller_temp, 0, sizeof(controller_temp));
-    APP_CHECK(issue_identity(service, "MAINT-TERMINAL-17", usage,
-                  base_now + 1U, &maint_cert, &maint_temp),
+    APP_CHECK(issue_identity(service, cfg.terminal_id, usage, base_now + 1U,
+                  &maint_cert, &maint_temp),
         "issue maintenance terminal certificate");
-    APP_CHECK(issue_identity(service, "LINE-CTRL-07", usage, base_now + 2U,
+    APP_CHECK(issue_identity(service, cfg.controller_id, usage, base_now + 2U,
                   &controller_cert, &controller_temp),
         "issue line controller certificate");
 
@@ -219,12 +386,13 @@ int main(void)
             == SM2_PKI_SUCCESS,
         "import 2-of-2 checkpoint");
 
-    const uint8_t command[] = "maintenance:open-panel:line-ctrl-07";
+    const uint8_t *command = (const uint8_t *)cfg.command;
+    const size_t command_len = strlen(cfg.command);
     sm2_auth_signature_t signature;
     sm2_pki_evidence_bundle_t evidence;
     sm2_pki_verify_request_t request;
-    APP_CHECK(build_request(terminal, command, sizeof(command) - 1U,
-                  base_now + 10U, &signature, &evidence, &request),
+    APP_CHECK(build_request(terminal, command, command_len, base_now + 10U,
+                  &signature, &evidence, &request),
         "build signed maintenance command");
 
     size_t matched = 0;
@@ -253,6 +421,22 @@ int main(void)
     APP_CHECK(sm2_pki_verify(gateway, &request, base_now + 20U, &matched)
             == SM2_PKI_ERR_VERIFY,
         "reject command after revocation");
+
+    if (cfg.json_output)
+    {
+        printf("{\"product\":\"EdgeAccessPKI\",\"site\":\"%s\","
+               "\"line\":\"%s\",\"terminal\":\"%s\","
+               "\"decision_before_revocation\":\"ALLOW\","
+               "\"decision_after_revocation\":\"DENY\","
+               "\"required_witnesses\":%u,\"fail_closed\":%s}\n",
+            cfg.site_id, cfg.line_id, cfg.terminal_id, cfg.required_witnesses,
+            cfg.fail_closed ? "true" : "false");
+    }
+    else
+    {
+        printf("[DECISION] ALLOW maintenance command before revocation\n");
+        printf("[DECISION] DENY maintenance command after revocation\n");
+    }
 
     sm2_pki_client_destroy(&gateway);
     sm2_pki_client_destroy(&terminal);

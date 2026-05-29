@@ -1,11 +1,28 @@
 # Run Result
 
-一次成功运行表示工业边缘网关完成以下动作：
+The following result was produced with:
 
-- 接收并验证维护终端的证书和签名。
-- 检查证据包中的撤销证明和发证证明。
-- 使用 2-of-2 witness 策略导入 CA checkpoint。
-- 将证据包编码为可携带 wire 格式。
-- 在维护终端证书撤销后拒绝旧命令。
+```bash
+./build-product-mingw/edge_access_pki.exe --config config/gateway.conf --json
+```
 
-该结果对应工业现场常见的维护准入流程：允许当前可信终端进入，阻止已撤销终端继续使用旧材料。
+Key events:
+
+```text
+[OK] load gateway configuration
+[OK] enforce 2-of-2 plant policy
+[INFO] site=plant-east line=line-ctrl-07 terminal=MAINT-TERMINAL-17 controller=LINE-CTRL-07
+[OK] import 2-of-2 checkpoint
+[OK] accept signed maintenance command
+[OK] encode portable evidence
+[OK] revoke maintenance terminal
+[OK] reject command after revocation
+```
+
+Structured decision:
+
+```json
+{"product":"EdgeAccessPKI","site":"plant-east","line":"line-ctrl-07","terminal":"MAINT-TERMINAL-17","decision_before_revocation":"ALLOW","decision_after_revocation":"DENY","required_witnesses":2,"fail_closed":true}
+```
+
+The result matches an industrial maintenance gate: a valid maintenance terminal is accepted during the authorized window, and the same terminal is rejected after revocation even if it keeps presenting old evidence.

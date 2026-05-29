@@ -1,0 +1,3 @@
+terminal_id,role,line_id,allowed_command,window_s
+MAINT-TERMINAL-17,maintenance,line-ctrl-07,maintenance:open-panel:line-ctrl-07,900
+QA-TERMINAL-02,audit,line-ctrl-07,maintenance:read-status:line-ctrl-07,600
